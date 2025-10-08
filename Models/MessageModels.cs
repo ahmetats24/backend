@@ -5,21 +5,39 @@ namespace ChatApp.Api.Models
     public class MessageModel
     {
         public int Id { get; set; }
+
+        // Mesajı gönderen kullanıcının adı (display purposes)
         public required string User { get; set; }
+
+        // Foreign key
         public int UserId { get; set; }
+
+        // Mesaj içeriği
         public required string Text { get; set; }
+
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
-        public string? Sentiment { get; set; }
-        public double? SentimentScore { get; set; }
+
+        // AI Sentiment Analizi Sonuçları
+        public string? Sentiment { get; set; }          // "positive" | "negative" | "neutral"
+        public double? SentimentScore { get; set; }     // 0.0 – 1.0 arası skor
+
+        // Navigation property
         public UserModel? UserRef { get; set; }
     }
 
     public class UserModel
     {
         public int Id { get; set; }
+
+        // Kullanıcının sistemdeki benzersiz takma adı
         public required string Nickname { get; set; }
-        public string? DisplayName { get; set; } // Kullanıcının yazdığı orijinal hali
+
+        // Kullanıcının ilk yazdığı orijinal hali (UI'de göstermek için)
+        public string? DisplayName { get; set; }
+
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+
+        // Navigation property
         public ICollection<MessageModel> Messages { get; set; } = new List<MessageModel>();
     }
 
@@ -35,9 +53,20 @@ namespace ChatApp.Api.Models
             modelBuilder.Entity<MessageModel>(b =>
             {
                 b.HasKey(m => m.Id);
-                b.Property(m => m.User).HasMaxLength(64).IsRequired();
-                b.Property(m => m.Text).HasMaxLength(4000).IsRequired();
-                b.Property(m => m.Sentiment).HasMaxLength(16);
+
+                b.Property(m => m.User)
+                    .HasMaxLength(64)
+                    .IsRequired();
+
+                b.Property(m => m.Text)
+                    .HasMaxLength(4000)
+                    .IsRequired();
+
+                b.Property(m => m.Sentiment)
+                    .HasMaxLength(16);
+
+                b.Property(m => m.SentimentScore);
+
                 b.HasOne(m => m.UserRef)
                     .WithMany(u => u.Messages)
                     .HasForeignKey(m => m.UserId)
@@ -47,9 +76,16 @@ namespace ChatApp.Api.Models
             modelBuilder.Entity<UserModel>(b =>
             {
                 b.HasKey(u => u.Id);
-                b.Property(u => u.Nickname).HasMaxLength(64).IsRequired();
-                b.Property(u => u.DisplayName).HasMaxLength(64);
-                b.HasIndex(u => u.Nickname).IsUnique();
+
+                b.Property(u => u.Nickname)
+                    .HasMaxLength(64)
+                    .IsRequired();
+
+                b.Property(u => u.DisplayName)
+                    .HasMaxLength(64);
+
+                b.HasIndex(u => u.Nickname)
+                    .IsUnique();
             });
         }
     }
