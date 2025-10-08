@@ -20,13 +20,13 @@ namespace ChatApp.Api.Controllers
             _db = db;
             _configuration = configuration;
         }
+
         // GET /api/messages/all
         [HttpGet("all")]
         public async Task<IActionResult> GetAllMessages([FromQuery] int count = 50)
         {
-            // Son 'count' mesajı alıyoruz (default 50)
             var messages = await _db.Messages
-                .Include(m => m.UserRef) // User bilgisi için
+                .Include(m => m.UserRef)
                 .OrderByDescending(m => m.Id)
                 .Take(Math.Clamp(count, 1, 100))
                 .Select(m => new
@@ -38,7 +38,7 @@ namespace ChatApp.Api.Controllers
                     score = m.SentimentScore,
                     createdAtUtc = m.CreatedAtUtc
                 })
-                .OrderBy(m => m.createdAtUtc) // eski → yeni sıralama
+                .OrderBy(m => m.createdAtUtc)
                 .ToListAsync();
 
             return Ok(messages);
@@ -52,7 +52,7 @@ namespace ChatApp.Api.Controllers
                 return BadRequest("User and Text are required.");
             }
 
-            // Resolve or create user by nickname
+            // Kullanıcıyı bul veya oluştur
             var originalNickname = message.User.Trim();
             var nickname = originalNickname.ToLowerInvariant();
             var user = await _db.Users.FirstOrDefaultAsync(u => u.Nickname == nickname);
@@ -68,12 +68,12 @@ namespace ChatApp.Api.Controllers
                 await _db.SaveChangesAsync();
             }
 
-            // Save initial message bound to user
+            // Mesaj kaydet
             message.UserId = user.Id;
             _db.Messages.Add(message);
             await _db.SaveChangesAsync();
 
-            // Build AI request
+            // AI request
             var client = _httpClientFactory.CreateClient();
             var provider = _configuration["AiService:Provider"] ?? "huggingface";
             var aiBase = _configuration["AiService:BaseUrl"] ?? "";
@@ -89,58 +89,23 @@ namespace ChatApp.Api.Controllers
             {
                 if (provider.Equals("huggingface", StringComparison.OrdinalIgnoreCase))
                 {
-                    // HF Inference API beklenen payload: { inputs: string }
-                    var primaryUrl = string.IsNullOrWhiteSpace(aiPath) ? aiBase : new Uri(new Uri(aiBase.EndsWith('/') ? aiBase : aiBase + "/"), aiPath.TrimStart('/')).ToString();
-                    Console.WriteLine($"[AI] Provider=huggingface URL={primaryUrl}");
+                    var primaryUrl = string.IsNullOrWhiteSpace(aiPath)
+                        ? aiBase
+                        : new Uri(new Uri(aiBase.EndsWith('/') ? aiBase : aiBase + "/"), aiPath.TrimStart('/')).ToString();
+
                     response = await client.PostAsJsonAsync(primaryUrl, new { inputs = message.Text });
+
                     if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                     {
-                        // Try with/without trailing slash
                         var altUrl = primaryUrl.EndsWith('/') ? primaryUrl.TrimEnd('/') : primaryUrl + "/";
-                        Console.WriteLine($"[AI] Provider=huggingface ALT URL={altUrl}");
                         response = await client.PostAsJsonAsync(altUrl, new { inputs = message.Text });
                     }
                 }
-                else if (provider.Equals("hf-space", StringComparison.OrdinalIgnoreCase))
-                {
-                    var baseUri = new Uri(aiBase.EndsWith('/') ? aiBase : aiBase + "/");
-                    var candidatePaths = new List<string>
-                    {
-                        string.IsNullOrWhiteSpace(aiPath) ? "api/predict" : aiPath.TrimStart('/'),
-                        string.IsNullOrWhiteSpace(aiPath) ? "api/predict/" : (aiPath.TrimStart('/').EndsWith('/') ? aiPath.TrimStart('/') : aiPath.TrimStart('/') + "/"),
-                        "run/predict",
-                        "run/predict/"
-                    };
-                    var payloads = new object[]
-                    {
-                        new { data = new object[] { message.Text } },
-                        new { data = new object[] { new object[] { message.Text } } },
-                        new { data = new object[] { message.Text }, fn_index = 0 },
-                        new { data = new object[] { new object[] { message.Text } }, fn_index = 0 }
-                    };
-
-                    HttpResponseMessage? last = null;
-                    foreach (var p in candidatePaths)
-                    {
-                        var url = new Uri(baseUri, p);
-                        foreach (var body in payloads)
-                        {
-                            var r = await client.PostAsJsonAsync(url, body);
-                            last = r;
-                            if (r.IsSuccessStatusCode)
-                            {
-                                response = r;
-                                goto PredictOk;
-                            }
-                        }
-                    }
-                    response = last ?? new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
-                PredictOk:;
-                }
                 else
                 {
-                    // Custom AI service (FastAPI/Gradio) payload: { text: string }
-                    var url = new Uri(new Uri(aiBase.EndsWith('/') ? aiBase : aiBase + "/"), string.IsNullOrWhiteSpace(aiPath) ? "analyze" : aiPath.TrimStart('/'));
+                    // Custom AI service
+                    var url = new Uri(new Uri(aiBase.EndsWith('/') ? aiBase : aiBase + "/"),
+                        string.IsNullOrWhiteSpace(aiPath) ? "predict" : aiPath.TrimStart('/'));
                     response = await client.PostAsJsonAsync(url, new { text = message.Text });
                 }
             }
@@ -148,17 +113,19 @@ namespace ChatApp.Api.Controllers
             {
                 return StatusCode(502, new { id = message.Id, text = message.Text, error = "AI connection failed", details = ex.Message });
             }
+
             if (!response.IsSuccessStatusCode)
             {
                 var errorBody = await response.Content.ReadAsStringAsync();
                 return StatusCode((int)response.StatusCode, new { id = message.Id, text = message.Text, error = "AI request failed", details = errorBody });
             }
 
+            // AI sonucunu çöz
             string? sentiment = null;
             double? score = null;
+
             if (provider.Equals("huggingface", StringComparison.OrdinalIgnoreCase))
             {
-                // Read once to avoid ObjectDisposedException
                 var json = await response.Content.ReadAsStringAsync();
                 try
                 {
@@ -172,63 +139,7 @@ namespace ChatApp.Api.Controllers
                         if (double.TryParse(best.GetValueOrDefault("score")?.ToString(), out var ds)) score = ds;
                     }
                 }
-                catch
-                {
-                    try
-                    {
-                        var hfNested = JsonSerializer.Deserialize<List<List<Dictionary<string, object>>>>(json);
-                        var first = hfNested?.FirstOrDefault()?.OrderByDescending(x => double.TryParse(x.GetValueOrDefault("score")?.ToString(), out var d) ? d : 0).FirstOrDefault();
-                        if (first != null)
-                        {
-                            sentiment = first.GetValueOrDefault("label")?.ToString();
-                            if (double.TryParse(first.GetValueOrDefault("score")?.ToString(), out var dn)) score = dn;
-                        }
-                    }
-                    catch
-                    {
-                        // Leave sentiment/score null; body may be an error/unsupported shape
-                    }
-                }
-            }
-            else if (provider.Equals("hf-space", StringComparison.OrdinalIgnoreCase))
-            {
-                // Gradio Spaces predict returns { data: [...] }
-                var obj = await response.Content.ReadFromJsonAsync<Dictionary<string, object>>();
-                if (obj != null && obj.TryGetValue("data", out var dataObj) && dataObj is JsonElement je)
-                {
-                    if (je.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var item in je.EnumerateArray())
-                        {
-                            if (item.ValueKind == JsonValueKind.Object)
-                            {
-                                if (item.TryGetProperty("label", out var l)) sentiment = l.GetString();
-                                if (item.TryGetProperty("score", out var sc) && sc.TryGetDouble(out var d)) score = d;
-                                if (sentiment != null) break;
-                            }
-                            else if (item.ValueKind == JsonValueKind.String)
-                            {
-                                // Some Spaces return plain string label in data array
-                                sentiment = item.GetString();
-                                break;
-                            }
-                            else if (item.ValueKind == JsonValueKind.Array)
-                            {
-                                // Sometimes [[label, score]] or similar
-                                var inner = item.EnumerateArray().ToArray();
-                                if (inner.Length >= 1 && inner[0].ValueKind == JsonValueKind.String)
-                                {
-                                    sentiment = inner[0].GetString();
-                                }
-                                if (inner.Length >= 2 && inner[1].ValueKind == JsonValueKind.Number && inner[1].TryGetDouble(out var d2))
-                                {
-                                    score = d2;
-                                }
-                                if (sentiment != null) break;
-                            }
-                        }
-                    }
-                }
+                catch { }
             }
             else
             {
@@ -240,9 +151,10 @@ namespace ChatApp.Api.Controllers
                 }
             }
 
-            // Update and persist sentiment
+            // DB kaydını güncelle
             message.Sentiment = sentiment;
             message.SentimentScore = score;
+            _db.Messages.Update(message);
             await _db.SaveChangesAsync();
 
             return Ok(new { id = message.Id, text = message.Text, sentiment, score });
@@ -259,7 +171,8 @@ namespace ChatApp.Api.Controllers
                 .Where(m => m.UserId == user.Id)
                 .OrderByDescending(m => m.Id)
                 .Take(Math.Clamp(count, 1, 100))
-                .Select(m => new {
+                .Select(m => new
+                {
                     id = m.Id,
                     text = m.Text,
                     sentiment = m.Sentiment,
